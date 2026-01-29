@@ -22,7 +22,7 @@ function open_connection(){
         return;
     }
 
-     ws = new WebSocket("ws://localhost:8000/ws/chat");
+     ws = new WebSocket("ws://localhost:8000/ws/chat-bot");
 
      ws.onmessage = e => document.getElementById("log").innerText += e.data + "\n";
      ws.onclose = () => {

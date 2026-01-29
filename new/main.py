@@ -5,6 +5,9 @@ from dao.users import get_users, create_user
 from database import init_db
 from serializer.user import UserCreate
 from connectionManager import ConnectionManager
+from callAI import stream_ai
+from dotenv import load_dotenv
+load_dotenv()
 
 app = FastAPI()
 
@@ -36,6 +39,22 @@ async def websocket_endpoint(ws: WebSocket):
         while True:
             data = await ws.receive_text()
             await ws.send_text(f"Echo: {data}")
+
+    except WebSocketDisconnect:
+        manager.disconnect(ws)
+
+@app.websocket("/ws/chat-bot")
+async def websocket_endpoint_for_bot(ws: WebSocket):
+    await manager.connect(ws)
+    try:
+        while True:
+            data = await ws.receive_text()
+            try:
+                async for chunk in stream_ai(data):
+                    print("chunk >>>", chunk)
+                    await ws.send_text(f"{chunk}")
+            except Exception as e:
+                await ws.send_text(f"⚠️ AI error, please try again: {e}")
 
     except WebSocketDisconnect:
         manager.disconnect(ws)
