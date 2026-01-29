@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Test</title>
+</head>
+<body>
+    <h1>WebSocket Test</h1>
+    <div>
+        <input type="text" id="messageInput" placeholder="Enter message" style="width: 300px;">
+        <button onclick="sendMessage()">Send</button>
+        <button onclick="connect()">Connect</button>
+        <button onclick="disconnect()">Disconnect</button>
+    </div>
+    <div id="messages" style="margin-top: 20px; border: 1px solid #ccc; padding: 10px; height: 300px; overflow-y: scroll;"></div>
+
+    <script>
+        let ws = null;
+
+        function connect() {
+            if (ws) {
+                ws.close();
+            }
+
+            ws = new WebSocket('ws://localhost:8000/api/ws');
+
+            ws.onopen = function(event) {
+                addMessage('Connected to WebSocket');
+            };
+
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                addMessage('Received: ' + JSON.stringify(data, null, 2));
+            };
+
+            ws.onclose = function(event) {
+                addMessage('Disconnected from WebSocket');
+            };
+
+            ws.onerror = function(error) {
+                addMessage('Error: ' + error);
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value;
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const data = {
+                    data: message,
+                    timestamp: new Date().toISOString()
+                };
+                ws.send(JSON.stringify(data));
+                addMessage('Sent: ' + JSON.stringify(data, null, 2));
+                input.value = '';
+            } else {
+                addMessage('WebSocket is not connected');
+            }
+        }
+
+        function addMessage(message) {
+            const messages = document.getElementById('messages');
+            const div = document.createElement('div');
+            div.textContent = message;
+            div.style.marginBottom = '5px';
+            div.style.padding = '5px';
+            div.style.backgroundColor = '#f0f0f0';
+            messages.appendChild(div);
+            messages.scrollTop = messages.scrollHeight;
+        }
+
+        document.getElementById('messageInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Voice Chat Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .controls {
+            margin: 20px 0;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .status.listening {
+            background-color: #e3f2fd;
+            color: #1976d2;
+        }
+        .status.processing {
+            background-color: #fff3e0;
+            color: #f57c00;
+        }
+        .status.responding {
+            background-color: #f3e5f5;
+            color: #7b1fa2;
+        }
+        .status.disconnected {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+        .messages {
+            margin-top: 20px;
+            border: 1px solid #ccc;
+            padding: 10px;
+            height: 300px;
+            overflow-y: scroll;
+            background-color: #f9f9f9;
+        }
+        .message {
+            margin-bottom: 10px;
+            padding: 8px;
+            border-radius: 5px;
+            background-color: white;
+        }
+        .transcript {
+            font-style: italic;
+            color: #555;
+        }
+        .response {
+            color: #333;
+            font-weight: 500;
+        }
+        .debug {
+            font-family: monospace;
+            font-size: 12px;
+            color: #666;
+            background-color: #f0f0f0;
+            padding: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Voice Chat Test</h1>
+
+    <div class="controls">
+        <button id="connectBtn" onclick="connect()">Connect</button>
+        <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+        <button id="micBtn" onclick="toggleMicrophone()" disabled>🎤 Start Microphone</button>
+    </div>
+
+    <div id="status" class="status disconnected">Status: Disconnected</div>
+
+    <div class="messages">
+        <div id="messageList"></div>
+    </div>
+
+    <script>
+        let ws = null;
+        let mediaRecorder = null;
+        let audioContext = null;
+        let microphoneStream = null;
+        let isRecording = false;
+        let audioQueue = [];
+        let isPlayingAudio = false;
+
+        // WebSocket connection
+        function connect() {
+            try {
+                ws = new WebSocket('ws://localhost:8000/api/ws');
+
+                ws.onopen = function(event) {
+                    updateStatus('connected', 'Connected');
+                    document.getElementById('connectBtn').disabled = true;
+                    document.getElementById('disconnectBtn').disabled = false;
+                    document.getElementById('micBtn').disabled = false;
+                    addMessage('Connected to voice server', 'system');
+                };
+
+                ws.onmessage = async function(event) {
+                    try {
+                        const message = JSON.parse(event.data);
+
+                        if (message.type === 'state') {
+                            updateStatus(message.value, message.value);
+                        } else if (message.type === 'audio') {
+                            // Handle audio response
+                            playAudioData(message.data);
+                        } else {
+                            addMessage(`Received: ${JSON.stringify(message)}`, 'debug');
+                        }
+                    } catch (error) {
+                        addMessage(`Error parsing message: ${error}`, 'debug');
+                        console.error('Error parsing message:', error, event.data);
+                    }
+                };
+
+                ws.onclose = function(event) {
+                    updateStatus('disconnected', 'Disconnected');
+                    document.getElementById('connectBtn').disabled = false;
+                    document.getElementById('disconnectBtn').disabled = true;
+                    document.getElementById('micBtn').disabled = true;
+                    addMessage(`Disconnected: ${event.code} ${event.reason}`, 'system');
+                    if (isRecording) {
+                        stopMicrophone();
+                    }
+                };
+
+                ws.onerror = function(error) {
+                    addMessage(`WebSocket error: ${error}`, 'error');
+                    console.error('WebSocket error:', error);
+                };
+            } catch (error) {
+                addMessage(`Failed to connect: ${error}`, 'error');
+            }
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        // Microphone handling
+        async function toggleMicrophone() {
+            if (!isRecording) {
+                await startMicrophone();
+            } else {
+                stopMicrophone();
+            }
+        }
+
+        async function startMicrophone() {
+            try {
+                // Get microphone access
+                microphoneStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    }
+                });
+
+                // Create audio context for processing
+                audioContext = new AudioContext({ sampleRate: 16000 });
+
+                // Create media recorder for chunked audio
+                const options = { mimeType: 'audio/webm' };
+                mediaRecorder = new MediaRecorder(microphoneStream, options);
+
+                // Send audio chunks every 100ms
+                mediaRecorder.ondataavailable = async function(event) {
+                    if (event.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
+                        // Convert webm to raw audio buffer
+                        const arrayBuffer = await event.data.arrayBuffer();
+
+                        // For simplicity, we'll send the webm chunk
+                        // In production, you'd convert to raw PCM16
+                        ws.send(arrayBuffer);
+                    }
+                };
+
+                mediaRecorder.start(100); // Send chunks every 100ms
+                isRecording = true;
+
+                document.getElementById('micBtn').textContent = '🔴 Stop Microphone';
+                document.getElementById('micBtn').style.backgroundColor = '#ff4444';
+                addMessage('Microphone started - Speak now!', 'system');
+
+            } catch (error) {
+                addMessage(`Failed to start microphone: ${error}`, 'error');
+                console.error('Microphone error:', error);
+            }
+        }
+
+        function stopMicrophone() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+            }
+
+            if (microphoneStream) {
+                microphoneStream.getTracks().forEach(track => track.stop());
+                microphoneStream = null;
+            }
+
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+
+            isRecording = false;
+            document.getElementById('micBtn').textContent = '🎤 Start Microphone';
+            document.getElementById('micBtn').style.backgroundColor = '';
+            addMessage('Microphone stopped', 'system');
+        }
+
+        // Audio playback
+        async function playAudioData(audioData) {
+            try {
+                // If audioData is base64 encoded
+                const audioBytes = atob(audioData);
+                const arrayBuffer = new ArrayBuffer(audioBytes.length);
+                const view = new Uint8Array(arrayBuffer);
+
+                for (let i = 0; i < audioBytes.length; i++) {
+                    view[i] = audioBytes.charCodeAt(i);
+                }
+
+                // Create audio context if needed
+                if (!audioContext) {
+                    audioContext = new AudioContext();
+                }
+
+                // Decode and play audio
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                source.start();
+
+                addMessage('Playing audio response', 'system');
+            } catch (error) {
+                addMessage(`Error playing audio: ${error}`, 'error');
+                console.error('Audio playback error:', error);
+            }
+        }
+
+        // UI helpers
+        function updateStatus(state, message) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.className = `status ${state}`;
+            statusDiv.textContent = `Status: ${message}`;
+        }
+
+        function addMessage(text, type = 'info') {
+            const messageList = document.getElementById('messageList');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+
+            const timestamp = new Date().toLocaleTimeString();
+            messageDiv.innerHTML = `<span style="color: #666; font-size: 12px;">[${timestamp}]</span> ${text}`;
+
+            messageList.appendChild(messageDiv);
+            messageList.scrollTop = messageList.scrollHeight;
+        }
+
+        // Cleanup on page unload
+        window.onbeforeunload = function() {
+            disconnect();
+        };
+    </script>
+</body>
+</html>

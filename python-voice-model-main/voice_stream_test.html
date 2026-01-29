@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Continuous Voice Stream Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        #status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            font-weight: bold;
+            background-color: #f0f0f0;
+        }
+        #messages {
+            margin-top: 20px;
+            border: 1px solid #ccc;
+            padding: 10px;
+            height: 300px;
+            overflow-y: scroll;
+            background-color: #f9f9f9;
+        }
+        .message {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        .error { color: red; }
+        .info { color: blue; }
+        .success { color: green; }
+        .recording {
+            background-color: #ffebee;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        #volumeIndicator {
+            width: 100%;
+            height: 30px;
+            background-color: #e0e0e0;
+            border-radius: 5px;
+            margin: 10px 0;
+            position: relative;
+        }
+        #volumeBar {
+            height: 100%;
+            background-color: #4CAF50;
+            width: 0%;
+            transition: width 0.1s;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Continuous Voice Stream Test</h1>
+
+    <div>
+        <button id="connectBtn" onclick="connect()">Connect</button>
+        <button onclick="disconnect()" disabled>Disconnect</button>
+        <button onclick="toggleStream()" id="streamBtn" disabled>🎤 Start Streaming</button>
+        <button onclick="sendTestSpeech()" disabled>Send Test Speech</button>
+    </div>
+
+    <div id="status">Status: Disconnected</div>
+
+    <div id="volumeIndicator">
+        <div id="volumeBar"></div>
+    </div>
+
+    <div id="messages"></div>
+
+    <script>
+        let ws = null;
+        let isConnected = false;
+        let isStreaming = false;
+        let audioContext = null;
+        let mediaStream = null;
+        let source = null;
+        let processor = null;
+        let chunkCount = 0;
+
+        function connect() {
+            ws = new WebSocket('ws://localhost:8000/api/ws');
+
+            ws.onopen = function(event) {
+                isConnected = true;
+                updateStatus('Connected', '#d4edda');
+                document.querySelectorAll('button').forEach(btn => btn.disabled = false);
+                document.getElementById('connectBtn').disabled = true;
+                addMessage('Connected to WebSocket', 'success');
+
+                // Send initial message
+                ws.send(JSON.stringify({
+                    type: 'message',
+                    data: 'Client ready'
+                }));
+            };
+
+            ws.onmessage = function(event) {
+                try {
+                    const data = event.data;
+                    addMessage(`Received: ${data}`, 'info');
+
+                    const parsed = JSON.parse(data);
+                    if (parsed.type === 'state') {
+                        updateStatus(`State: ${parsed.value}`, '#d4edda');
+                        addMessage(`→ State changed to: ${parsed.value}`, 'success');
+                    }
+                } catch (error) {
+                    addMessage(`Error parsing message: ${error}`, 'error');
+                }
+            };
+
+            ws.onclose = function(event) {
+                isConnected = false;
+                updateStatus('Disconnected', '#f8d7da');
+                document.querySelectorAll('button').forEach(btn => btn.disabled = true);
+                document.getElementById('connectBtn').disabled = false;
+                addMessage(`Disconnected (code: ${event.code})`, 'info');
+                if (isStreaming) {
+                    stopStreaming();
+                }
+            };
+
+            ws.onerror = function(error) {
+                addMessage(`WebSocket error: ${error}`, 'error');
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+            }
+        }
+
+        async function toggleStream() {
+            if (!isStreaming) {
+                await startStreaming();
+            } else {
+                stopStreaming();
+            }
+        }
+
+        async function startStreaming() {
+            if (!isConnected) return;
+
+            try {
+                addMessage('🎤 Starting audio stream...', 'info');
+                document.getElementById('streamBtn').textContent = '⏹️ Stop Streaming';
+                document.getElementById('streamBtn').style.backgroundColor = '#ff4444';
+
+                // Get microphone access
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: true
+                    }
+                });
+
+                // Create audio context
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                source = audioContext.createMediaStreamSource(mediaStream);
+                processor = audioContext.createScriptProcessor(1024, 1, 1);
+
+                let audioLevel = 0;
+                let silentFrames = 0;
+
+                processor.onaudioprocess = function(e) {
+                    if (!isStreaming || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+                    const inputBuffer = e.inputBuffer.getChannelData(0);
+
+                    // Calculate audio level
+                    let sum = 0;
+                    for (let i = 0; i < inputBuffer.length; i++) {
+                        sum += Math.abs(inputBuffer[i]);
+                    }
+                    audioLevel = sum / inputBuffer.length;
+                    document.getElementById('volumeBar').style.width = Math.min(100, audioLevel * 500) + '%';
+
+                    // Convert to 16-bit PCM
+                    const pcmData = new Int16Array(inputBuffer.length);
+                    let hasVoice = false;
+
+                    for (let i = 0; i < inputBuffer.length; i++) {
+                        const sample = Math.max(-32768, Math.min(32767, inputBuffer[i] * 32768));
+                        pcmData[i] = sample;
+                        if (Math.abs(sample) > 1000) {
+                            hasVoice = true;
+                        }
+                    }
+
+                    // Send audio chunks continuously
+                    if (chunkCount % 3 === 0) { // Send every 3rd chunk to reduce load
+                        const base64 = btoa(String.fromCharCode.apply(null, new Uint8Array(pcmData.buffer)));
+
+                        const message = {
+                            type: 'audio',
+                            data: base64,
+                            sample_rate: 16000,
+                            channels: 1
+                        };
+
+                        ws.send(JSON.stringify(message));
+
+                        // Log periodically
+                        if (chunkCount % 30 === 0) {
+                            const status = hasVoice ? '🎤 SPEAKING' : '🔇 Silent';
+                            addMessage(`Sent chunk #${chunkCount}, Level: ${(audioLevel * 100).toFixed(1)}% ${status}`,
+                                     hasVoice ? 'success' : 'info');
+                        }
+                    }
+
+                    chunkCount++;
+                };
+
+                source.connect(processor);
+                // Don't connect to destination to avoid feedback
+
+                isStreaming = true;
+                addMessage('✅ Streaming started - Speak now!', 'success');
+
+            } catch (error) {
+                addMessage(`Error starting stream: ${error}`, 'error');
+                document.getElementById('streamBtn').textContent = '🎤 Start Streaming';
+                document.getElementById('streamBtn').style.backgroundColor = '';
+            }
+        }
+
+        function stopStreaming() {
+            if (processor) {
+                processor.disconnect();
+                processor = null;
+            }
+
+            if (source) {
+                source.disconnect();
+                source = null;
+            }
+
+            if (audioContext && audioContext.state !== 'closed') {
+                audioContext.close();
+                audioContext = null;
+            }
+
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+
+            isStreaming = false;
+            document.getElementById('streamBtn').textContent = '🎤 Start Streaming';
+            document.getElementById('streamBtn').style.backgroundColor = '';
+            document.getElementById('volumeBar').style.width = '0%';
+            addMessage('⏹️ Streaming stopped', 'info');
+        }
+
+        async function sendTestSpeech() {
+            if (!isConnected) return;
+
+            // Generate a speech-like test signal
+            const sampleRate = 16000;
+            const duration = 3; // 3 seconds
+            const numSamples = sampleRate * duration;
+            const audioData = new Int16Array(numSamples);
+
+            // Create a pattern that simulates speech
+            const currentTime = Date.now() / 1000;
+
+            for (let i = 0; i < numSamples; i++) {
+                const t = i / sampleRate;
+
+                // Create multiple frequencies to simulate voice
+                const fundamental = 150 * Math.sin(2 * Math.PI * 150 * t);
+                const overtone1 = 50 * Math.sin(2 * Math.PI * 300 * t);
+                const overtone2 = 25 * Math.sin(2 * Math.PI * 600 * t);
+
+                // Add amplitude modulation to simulate speech rhythm
+                const envelope = Math.sin(2 * Math.PI * 2 * t) * 0.3 + 0.7;
+
+                // Combine and scale
+                audioData[i] = (fundamental + overtone1 + overtone2) * envelope * 16383;
+
+                // Add some noise
+                audioData[i] += (Math.random() - 0.5) * 1000;
+            }
+
+            // Send in chunks
+            const chunkSize = 1024;
+            for (let i = 0; i < numSamples; i += chunkSize) {
+                const chunk = audioData.slice(i, i + chunkSize);
+                const base64 = btoa(String.fromCharCode.apply(null, new Uint8Array(chunk.buffer)));
+
+                const message = {
+                    type: 'audio',
+                    data: base64,
+                    sample_rate: 16000,
+                    channels: 1
+                };
+
+                ws.send(JSON.stringify(message));
+
+                // Small delay between chunks
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+
+            addMessage('✅ Sent test speech pattern', 'success');
+        }
+
+        function updateStatus(text, bgColor) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = `Status: ${text}`;
+            statusDiv.style.backgroundColor = bgColor;
+        }
+
+        function addMessage(text, type = 'info') {
+            const messages = document.getElementById('messages');
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            div.innerHTML = `<small>${new Date().toLocaleTimeString()}</small> ${text}`;
+            messages.appendChild(div);
+            messages.scrollTop = messages.scrollHeight;
+
+            // Limit messages to prevent memory issues
+            while (messages.children.length > 100) {
+                messages.removeChild(messages.firstChild);
+            }
+        }
+
+        // Cleanup
+        window.addEventListener('beforeunload', () => {
+            stopStreaming();
+            disconnect();
+        });
+    </script>
+</body>
+</html>

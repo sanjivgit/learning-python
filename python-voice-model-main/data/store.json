@@ -1,0 +1,168 @@
+{
+  "customers": [
+    {
+      "id": 1,
+      "name": "John Doe",
+      "email": "john.doe@example.com",
+      "phone": "+1-555-0101",
+      "address": "123 Main St, New York, NY 10001"
+    },
+    {
+      "id": 2,
+      "name": "Jane Smith",
+      "email": "jane.smith@example.com",
+      "phone": "+1-555-0102",
+      "address": "456 Oak Ave, Los Angeles, CA 90001"
+    },
+    {
+      "id": 3,
+      "name": "Alice Johnson",
+      "email": "alice.johnson@example.com",
+      "phone": "+1-555-0103",
+      "address": "789 Pine Rd, Chicago, IL 60007"
+    }
+  ],
+  "products": [
+    {
+      "id": 1,
+      "name": "Laptop Pro 15",
+      "description": "High-performance laptop with 16GB RAM and 512GB SSD",
+      "price": 1299.99,
+      "stock_quantity": 50,
+      "sku": "LP-PRO-15-001"
+    },
+    {
+      "id": 2,
+      "name": "Wireless Mouse",
+      "description": "Ergonomic wireless mouse with long battery life",
+      "price": 29.99,
+      "stock_quantity": 200,
+      "sku": "WM-ERGO-002"
+    },
+    {
+      "id": 3,
+      "name": "USB-C Hub",
+      "description": "7-in-1 USB-C hub with HDMI, USB 3.0, and SD card reader",
+      "price": 49.99,
+      "stock_quantity": 100,
+      "sku": "UCH-7IN1-003"
+    },
+    {
+      "id": 4,
+      "name": "Mechanical Keyboard",
+      "description": "RGB mechanical keyboard with blue switches",
+      "price": 89.99,
+      "stock_quantity": 75,
+      "sku": "KB-MECH-004"
+    },
+    {
+      "id": 5,
+      "name": "4K Monitor",
+      "description": "27-inch 4K UHD monitor with HDR support",
+      "price": 399.99,
+      "stock_quantity": 30,
+      "sku": "MN-4K27-005"
+    },
+    {
+      "id": 6,
+      "name": "Headphones Bluetooth",
+      "description": "Over-ear Bluetooth headphones with ANC",
+      "price": 149.99,
+      "stock_quantity": 80,
+      "sku": "HP-BT-008"
+    }
+  ],
+  "orders": [
+    {
+      "id": 1001,
+      "customer_id": 1,
+      "order_date": "2024-09-28T10:15:00",
+      "total_amount": 1379.97,
+      "status": "shipped"
+    },
+    {
+      "id": 1002,
+      "customer_id": 2,
+      "order_date": "2024-10-02T16:45:00",
+      "total_amount": 149.97,
+      "status": "processing"
+    },
+    {
+      "id": 1003,
+      "customer_id": 2,
+      "order_date": "2024-09-20T12:05:00",
+      "total_amount": 399.99,
+      "status": "delivered"
+    },
+    {
+      "id": 1004,
+      "customer_id": 3,
+      "order_date": "2024-10-05T09:30:00",
+      "total_amount": 179.98,
+      "status": "pending"
+    },
+    {
+      "id": 1005,
+      "customer_id": 1,
+      "order_date": "2024-09-15T14:20:00",
+      "total_amount": 99.98,
+      "status": "cancelled"
+    }
+  ],
+  "order_items": [
+    {
+      "order_id": 1001,
+      "product_id": 1,
+      "quantity": 1,
+      "unit_price": 1299.99
+    },
+    {
+      "order_id": 1001,
+      "product_id": 2,
+      "quantity": 1,
+      "unit_price": 29.99
+    },
+    {
+      "order_id": 1001,
+      "product_id": 3,
+      "quantity": 1,
+      "unit_price": 49.99
+    },
+    {
+      "order_id": 1002,
+      "product_id": 4,
+      "quantity": 1,
+      "unit_price": 89.99
+    },
+    {
+      "order_id": 1002,
+      "product_id": 2,
+      "quantity": 2,
+      "unit_price": 29.99
+    },
+    {
+      "order_id": 1003,
+      "product_id": 5,
+      "quantity": 1,
+      "unit_price": 399.99
+    },
+    {
+      "order_id": 1004,
+      "product_id": 6,
+      "quantity": 1,
+      "unit_price": 149.99
+    },
+    {
+      "order_id": 1004,
+      "product_id": 2,
+      "quantity": 1,
+      "unit_price": 29.99
+    },
+    {
+      "order_id": 1005,
+      "product_id": 3,
+      "quantity": 2,
+      "unit_price": 49.99
+    }
+  ]
+}

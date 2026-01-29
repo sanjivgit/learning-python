@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Pipecat Voice Client</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      button {
+        font-size: 1rem;
+        padding: 0.75rem 1.5rem;
+        margin-right: 1rem;
+        border-radius: 999px;
+        border: none;
+        cursor: pointer;
+      }
+      button.start {
+        background: #22c55e;
+        color: #0f172a;
+      }
+      button.stop {
+        background: #ef4444;
+        color: #0f172a;
+      }
+      .card {
+        background: rgba(15, 23, 42, 0.75);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 1rem;
+        padding: 1.5rem;
+        max-width: 720px;
+      }
+      .status {
+        display: flex;
+        gap: 1.5rem;
+        align-items: center;
+        margin: 1rem 0;
+      }
+      .status span {
+        font-weight: 600;
+      }
+      pre {
+        background: rgba(15, 23, 42, 0.6);
+        border-radius: 0.75rem;
+        padding: 1rem;
+        max-height: 240px;
+        overflow-y: auto;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.85rem;
+      }
+      a {
+        color: #38bdf8;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Pipecat Voice Assistant Tester</h1>
+      <p>
+        Click <em>Start session</em> to capture microphone audio and stream it over
+        WebSocket to the FastAPI/Pipecat backend. Incoming audio from the bot is played
+        through your speakers.
+      </p>
+
+      <div class="status">
+        <span>Socket:</span>
+        <span id="socket-status">disconnected</span>
+      </div>
+
+      <div class="status">
+        <span>Assistant:</span>
+        <span id="assistant-status">idle</span>
+      </div>
+
+      <div style="margin: 1.5rem 0;">
+        <button id="start" class="start">Start session</button>
+        <button id="stop" class="stop" disabled>Stop session</button>
+      </div>
+
+      <h3>Event log</h3>
+      <pre id="log"></pre>
+    </div>
+
+    <script>
+      const WS_URL = (function () {
+        const target = new URL(window.location.href);
+        target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
+        target.pathname = "/api/ws";
+        target.search = "";
+        return target.toString();
+      })();
+
+      const downsampleRate = 16000;
+      const logEl = document.getElementById("log");
+      const socketStatusEl = document.getElementById("socket-status");
+      const assistantStatusEl = document.getElementById("assistant-status");
+      const startBtn = document.getElementById("start");
+      const stopBtn = document.getElementById("stop");
+
+      let audioContext;
+      let mediaStream;
+      let processorNode;
+      let sourceNode;
+      let socket;
+      let isStreaming = false;
+
+      const playbackContext = new AudioContext();
+
+      function log(message, payload) {
+        const time = new Date().toLocaleTimeString();
+        const entry = payload
+          ? `${time} — ${message} \n${JSON.stringify(payload, null, 2)}\n`
+          : `${time} — ${message}\n`;
+        logEl.textContent = `${entry}${logEl.textContent}`.slice(0, 4000);
+      }
+
+      function updateSocketState(state) {
+        socketStatusEl.textContent = state;
+      }
+
+      function updateAssistantState(state) {
+        assistantStatusEl.textContent = state;
+      }
+
+      function base64FromArrayBuffer(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let binary = "";
+        const len = bytes.byteLength;
+        for (let i = 0; i < len; i += 1) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+      }
+
+      function arrayBufferFromBase64(base64) {
+        const binary = atob(base64);
+        const len = binary.length;
+        const buffer = new ArrayBuffer(len);
+        const view = new Uint8Array(buffer);
+        for (let i = 0; i < len; i += 1) {
+          view[i] = binary.charCodeAt(i);
+        }
+        return buffer;
+      }
+
+      function downsampleBuffer(inputBuffer, inputSampleRate, targetSampleRate) {
+        if (targetSampleRate === inputSampleRate) {
+          return inputBuffer;
+        }
+        const sampleRateRatio = inputSampleRate / targetSampleRate;
+        const newLength = Math.round(inputBuffer.length / sampleRateRatio);
+        const result = new Int16Array(newLength);
+        let offsetResult = 0;
+        let offsetBuffer = 0;
+        while (offsetResult < newLength) {
+          const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+          let accum = 0;
+          let count = 0;
+          for (let i = offsetBuffer; i < nextOffsetBuffer && i < inputBuffer.length; i += 1) {
+            accum += inputBuffer[i];
+            count += 1;
+          }
+          const sample = accum / (count || 1);
+          const clamped = Math.max(-1, Math.min(1, sample));
+          result[offsetResult] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+          offsetResult += 1;
+          offsetBuffer = nextOffsetBuffer;
+        }
+        return result;
+      }
+
+      function playPcmAudio(int16Array, sampleRate) {
+        const float32 = new Float32Array(int16Array.length);
+        for (let i = 0; i < int16Array.length; i += 1) {
+          float32[i] = int16Array[i] / 0x8000;
+        }
+        const audioBuffer = playbackContext.createBuffer(1, float32.length, sampleRate);
+        audioBuffer.copyToChannel(float32, 0);
+        const source = playbackContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(playbackContext.destination);
+        source.start();
+      }
+
+      async function handleSocketMessage(event) {
+        let payload;
+        try {
+          payload = JSON.parse(event.data);
+        } catch (err) {
+          log("Received non-JSON message", event.data);
+          return;
+        }
+
+        switch (payload.type) {
+          case "audio": {
+            const pcmBuffer = arrayBufferFromBase64(payload.data);
+            const int16 = new Int16Array(pcmBuffer);
+            const rate = payload.sample_rate || 48000;
+            playPcmAudio(int16, rate);
+            break;
+          }
+          case "message": {
+            let inner = payload.data;
+            try {
+              const maybe = JSON.parse(payload.data);
+              inner = maybe;
+            } catch (err) {
+              /** ignore **/
+            }
+            log("Message", inner);
+            if (inner && inner.type === "state") {
+              updateAssistantState(inner.value);
+            }
+            break;
+          }
+          default:
+            log("Unhandled payload", payload);
+        }
+      }
+
+      function sendAudioFrame(frame) {
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        const message = {
+          type: "audio",
+          data: base64FromArrayBuffer(frame.buffer),
+          sample_rate: downsampleRate,
+          channels: 1,
+        };
+        socket.send(JSON.stringify(message));
+      }
+
+      function handleAudioProcess(event) {
+        if (!isStreaming) {
+          return;
+        }
+        const inputData = event.inputBuffer.getChannelData(0);
+        const downsampled = downsampleBuffer(inputData, audioContext.sampleRate, downsampleRate);
+        sendAudioFrame(downsampled);
+      }
+
+      function stopStreaming() {
+        isStreaming = false;
+        if (processorNode) {
+          processorNode.disconnect();
+          processorNode.onaudioprocess = null;
+          processorNode = null;
+        }
+        if (sourceNode) {
+          sourceNode.disconnect();
+          sourceNode = null;
+        }
+        if (mediaStream) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+          mediaStream = null;
+        }
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.close();
+        }
+        socket = null;
+        updateSocketState("disconnected");
+        updateAssistantState("idle");
+        stopBtn.disabled = true;
+        startBtn.disabled = false;
+        log("Session stopped");
+      }
+
+      async function startStreaming() {
+        if (!audioContext) {
+          audioContext = new AudioContext();
+        }
+
+        try {
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              sampleRate: 48000,
+              echoCancellation: true,
+              noiseSuppression: true,
+            },
+          });
+        } catch (err) {
+          log("Microphone permission denied", err);
+          return;
+        }
+
+        sourceNode = audioContext.createMediaStreamSource(mediaStream);
+        processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+        processorNode.onaudioprocess = handleAudioProcess;
+        sourceNode.connect(processorNode);
+        processorNode.connect(audioContext.destination);
+
+        socket = new WebSocket(WS_URL);
+        socket.binaryType = "arraybuffer";
+        socket.onopen = () => {
+          updateSocketState("connected");
+          log("WebSocket connected", { url: WS_URL });
+          isStreaming = true;
+        };
+        socket.onmessage = handleSocketMessage;
+        socket.onclose = () => {
+          log("WebSocket closed");
+          stopStreaming();
+        };
+        socket.onerror = (err) => {
+          log("WebSocket error", err);
+        };
+
+        stopBtn.disabled = false;
+        startBtn.disabled = true;
+        log("Session started");
+      }
+
+      startBtn.addEventListener("click", startStreaming);
+      stopBtn.addEventListener("click", stopStreaming);
+
+      window.addEventListener("beforeunload", () => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.close();
+        }
+      });
+    </script>
+  </body>
+</html>

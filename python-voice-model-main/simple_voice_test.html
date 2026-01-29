@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Simple Voice Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        #status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            font-weight: bold;
+            background-color: #f0f0f0;
+        }
+        #messages {
+            margin-top: 20px;
+            border: 1px solid #ccc;
+            padding: 10px;
+            height: 300px;
+            overflow-y: scroll;
+            background-color: #f9f9f9;
+        }
+        .message {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        .error { color: red; }
+        .info { color: blue; }
+        .success { color: green; }
+    </style>
+</head>
+<body>
+    <h1>Simple Voice WebSocket Test</h1>
+
+    <div>
+        <button id="connectBtn" onclick="connect()">Connect</button>
+        <button onclick="disconnect()" disabled>Disconnect</button>
+        <button onclick="sendAudio()" disabled>Record 5s Audio</button>
+        <button onclick="toggleContinuousRecording()" disabled id="continuousBtn">🔴 Start Continuous</button>
+        <button onclick="sendMessage()" disabled>Send Text Message</button>
+    </div>
+
+    <div id="status">Status: Disconnected</div>
+
+    <div id="messages"></div>
+
+    <script>
+        let ws = null;
+        let audioContext = null;
+        let isConnected = false;
+
+        function connect() {
+            ws = new WebSocket('ws://localhost:8000/api/ws');
+
+            ws.onopen = function(event) {
+                isConnected = true;
+                document.getElementById('status').textContent = 'Status: Connected';
+                document.getElementById('status').style.backgroundColor = '#d4edda';
+                document.querySelectorAll('button').forEach(btn => btn.disabled = false);
+                document.getElementById('connectBtn').disabled = true;
+                addMessage('Connected to WebSocket', 'success');
+
+                // Send a simple text message to establish the connection properly
+                ws.send(JSON.stringify({
+                    type: 'message',
+                    data: 'Hello from client'
+                }));
+            };
+
+            ws.onmessage = function(event) {
+                try {
+                    // Parse the incoming message
+                    const data = event.data;
+                    addMessage(`Raw message: ${data}`, 'info');
+
+                    // Try to parse as JSON
+                    const parsed = JSON.parse(data);
+                    addMessage(`Parsed: ${JSON.stringify(parsed, null, 2)}`, 'info');
+
+                    // Check if it's a state message
+                    if (parsed.type === 'state') {
+                        document.getElementById('status').textContent = `Status: ${parsed.value}`;
+                        addMessage(`State changed to: ${parsed.value}`, 'success');
+                    }
+                } catch (error) {
+                    addMessage(`Error parsing message: ${error}`, 'error');
+                    addMessage(`Message was: ${event.data}`, 'error');
+                }
+            };
+
+            ws.onclose = function(event) {
+                isConnected = false;
+                document.getElementById('status').textContent = 'Status: Disconnected';
+                document.getElementById('status').style.backgroundColor = '#f8d7da';
+                document.querySelectorAll('button').forEach(btn => btn.disabled = true);
+                document.getElementById('connectBtn').disabled = false;
+                addMessage(`Disconnected - Code: ${event.code}, Reason: ${event.reason}`, 'info');
+            };
+
+            ws.onerror = function(error) {
+                addMessage(`WebSocket error: ${error}`, 'error');
+                console.error('WebSocket error:', error);
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+            }
+        }
+
+        function sendMessage() {
+            if (!isConnected) return;
+
+            const message = {
+                type: 'message',
+                data: 'Test message from client at ' + new Date().toISOString()
+            };
+
+            ws.send(JSON.stringify(message));
+            addMessage(`Sent: ${JSON.stringify(message)}`, 'info');
+        }
+
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let isRecording = false;
+        let isContinuousRecording = false;
+        let continuousStream = null;
+        let continuousSource = null;
+        let continuousProcessor = null;
+
+        async function sendAudio() {
+            if (!isConnected) return;
+
+            if (isRecording) {
+                addMessage('Already recording...', 'error');
+                return;
+            }
+
+            try {
+                addMessage('🎤 Starting recording for 5 seconds...', 'info');
+                document.querySelector('button[onclick="sendAudio()"]').disabled = true;
+                document.querySelector('button[onclick="sendAudio()"]').textContent = 'Recording... (5s)';
+
+                // Get microphone access
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
+
+                // Create audio context for processing
+                if (!audioContext) {
+                    audioContext = new AudioContext({ sampleRate: 16000 });
+                }
+
+                // Create script processor for real-time audio capture
+                const source = audioContext.createMediaStreamSource(stream);
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                const audioData = [];
+
+                processor.onaudioprocess = function(e) {
+                    const inputBuffer = e.inputBuffer.getChannelData(0);
+                    // Convert float32 to int16
+                    const int16Data = new Int16Array(inputBuffer.length);
+                    for (let i = 0; i < inputBuffer.length; i++) {
+                        int16Data[i] = Math.max(-32768, Math.min(32767, inputBuffer[i] * 32768));
+                    }
+                    audioData.push(int16Data);
+                };
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                // Record for 5 seconds
+                setTimeout(() => {
+                    processor.disconnect();
+                    source.disconnect();
+                    stream.getTracks().forEach(track => track.stop());
+
+                    // Combine all audio chunks
+                    const totalLength = audioData.reduce((sum, chunk) => sum + chunk.length, 0);
+                    const combinedAudio = new Int16Array(totalLength);
+                    let offset = 0;
+
+                    for (const chunk of audioData) {
+                        combinedAudio.set(chunk, offset);
+                        offset += chunk.length;
+                    }
+
+                    // Convert to base64
+                    const base64 = btoa(String.fromCharCode.apply(null, new Uint8Array(combinedAudio.buffer)));
+
+                    const audioMessage = {
+                        type: 'audio',
+                        data: base64,
+                        sample_rate: 16000,
+                        channels: 1
+                    };
+
+                    ws.send(JSON.stringify(audioMessage));
+                    addMessage(`✅ Sent ${totalLength} audio samples (${(totalLength/16000).toFixed(2)} seconds)`, 'success');
+
+                    document.querySelector('button[onclick="sendAudio()"]').disabled = false;
+                    document.querySelector('button[onclick="sendAudio()"]').textContent = 'Send Test Audio';
+                    isRecording = false;
+                }, 5000);
+
+                isRecording = true;
+
+            } catch (error) {
+                addMessage(`Error recording audio: ${error}`, 'error');
+                document.querySelector('button[onclick="sendAudio()"]').disabled = false;
+                document.querySelector('button[onclick="sendAudio()"]').textContent = 'Send Test Audio';
+                isRecording = false;
+            }
+        }
+
+        async function toggleContinuousRecording() {
+            if (!isContinuousRecording) {
+                await startContinuousRecording();
+            } else {
+                stopContinuousRecording();
+            }
+        }
+
+        async function startContinuousRecording() {
+            if (!isConnected) return;
+
+            try {
+                addMessage('🎤 Starting continuous recording...', 'info');
+
+                // Get microphone access
+                continuousStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
+
+                // Create audio context for processing
+                if (!audioContext) {
+                    audioContext = new AudioContext({ sampleRate: 16000 });
+                }
+
+                // Create script processor for real-time audio capture
+                continuousSource = audioContext.createMediaStreamSource(continuousStream);
+                continuousProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                let chunkCount = 0;
+
+                continuousProcessor.onaudioprocess = function(e) {
+                    if (!isContinuousRecording) return;
+
+                    const inputBuffer = e.inputBuffer.getChannelData(0);
+
+                    // Convert float32 to int16
+                    const int16Data = new Int16Array(inputBuffer.length);
+                    for (let i = 0; i < inputBuffer.length; i++) {
+                        int16Data[i] = Math.max(-32768, Math.min(32767, inputBuffer[i] * 32768));
+                    }
+
+                    // Send audio chunk every 2nd chunk to avoid flooding
+                    if (chunkCount % 2 === 0) {
+                        const base64 = btoa(String.fromCharCode.apply(null, new Uint8Array(int16Data.buffer)));
+
+                        const audioMessage = {
+                            type: 'audio',
+                            data: base64,
+                            sample_rate: 16000,
+                            channels: 1
+                        };
+
+                        ws.send(JSON.stringify(audioMessage));
+                    }
+                    chunkCount++;
+                };
+
+                continuousSource.connect(continuousProcessor);
+                // Don't connect to destination to avoid feedback
+
+                isContinuousRecording = true;
+                document.getElementById('continuousBtn').textContent = '⏹️ Stop Continuous';
+                document.getElementById('continuousBtn').style.backgroundColor = '#ff4444';
+                addMessage('✅ Continuous recording started - Speak now!', 'success');
+
+            } catch (error) {
+                addMessage(`Error starting continuous recording: ${error}`, 'error');
+            }
+        }
+
+        function stopContinuousRecording() {
+            if (continuousProcessor) {
+                continuousProcessor.disconnect();
+                continuousProcessor = null;
+            }
+
+            if (continuousSource) {
+                continuousSource.disconnect();
+                continuousSource = null;
+            }
+
+            if (continuousStream) {
+                continuousStream.getTracks().forEach(track => track.stop());
+                continuousStream = null;
+            }
+
+            isContinuousRecording = false;
+            document.getElementById('continuousBtn').textContent = '🔴 Start Continuous';
+            document.getElementById('continuousBtn').style.backgroundColor = '';
+            addMessage('⏹️ Continuous recording stopped', 'info');
+        }
+
+        function addMessage(text, type = 'info') {
+            const messages = document.getElementById('messages');
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            div.innerHTML = `<small>${new Date().toLocaleTimeString()}</small> ${text}`;
+            messages.appendChild(div);
+            messages.scrollTop = messages.scrollHeight;
+        }
+    </script>
+</body>
+</html>

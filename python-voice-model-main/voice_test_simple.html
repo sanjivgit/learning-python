@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Simple Voice Test - Direct PCM</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        #status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            font-weight: bold;
+            background-color: #f0f0f0;
+        }
+        #messages {
+            margin-top: 20px;
+            border: 1px solid #ccc;
+            padding: 10px;
+            height: 300px;
+            overflow-y: scroll;
+            background-color: #f9f9f9;
+        }
+        .message {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        .error { color: red; }
+        .info { color: blue; }
+        .success { color: green; }
+    </style>
+</head>
+<body>
+    <h1>Simple Voice Test - Direct PCM</h1>
+
+    <div>
+        <button id="connectBtn" onclick="connect()">Connect</button>
+        <button onclick="disconnect()" disabled>Disconnect</button>
+        <button onclick="recordAndSend()" id="recordBtn" disabled>🎤 Record 3 Seconds</button>
+        <button onclick="sendTestTone()" disabled>Send Test Tone</button>
+    </div>
+
+    <div id="status">Status: Disconnected</div>
+    <div id="messages"></div>
+
+    <script>
+        let ws = null;
+        let isConnected = false;
+
+        function connect() {
+            ws = new WebSocket('ws://localhost:8000/api/ws');
+
+            ws.onopen = function(event) {
+                isConnected = true;
+                document.getElementById('status').textContent = 'Status: Connected';
+                document.getElementById('status').style.backgroundColor = '#d4edda';
+                document.querySelectorAll('button').forEach(btn => btn.disabled = false);
+                document.getElementById('connectBtn').disabled = true;
+                addMessage('Connected to WebSocket', 'success');
+
+                // Send initial message
+                ws.send(JSON.stringify({
+                    type: 'message',
+                    data: 'Hello from client'
+                }));
+            };
+
+            ws.onmessage = function(event) {
+                try {
+                    const data = event.data;
+                    addMessage(`Received: ${data}`, 'info');
+
+                    const parsed = JSON.parse(data);
+                    if (parsed.type === 'state') {
+                        document.getElementById('status').textContent = `Status: ${parsed.value}`;
+                        addMessage(`State: ${parsed.value}`, 'success');
+                    }
+                } catch (error) {
+                    addMessage(`Error: ${error}`, 'error');
+                }
+            };
+
+            ws.onclose = function(event) {
+                isConnected = false;
+                document.getElementById('status').textContent = 'Status: Disconnected';
+                document.getElementById('status').style.backgroundColor = '#f8d7da';
+                document.querySelectorAll('button').forEach(btn => btn.disabled = true);
+                document.getElementById('connectBtn').disabled = false;
+                addMessage(`Disconnected - Code: ${event.code}`, 'info');
+            };
+
+            ws.onerror = function(error) {
+                addMessage(`WebSocket error: ${error}`, 'error');
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+            }
+        }
+
+        async function recordAndSend() {
+            if (!isConnected) return;
+
+            try {
+                addMessage('🎤 Recording for 3 seconds...', 'info');
+                document.getElementById('recordBtn').disabled = true;
+                document.getElementById('recordBtn').textContent = 'Recording...';
+
+                // Get microphone
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false
+                    }
+                });
+
+                // Create audio context
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                const source = audioContext.createMediaStreamSource(stream);
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                const audioData = [];
+                let startTime = Date.now();
+
+                processor.onaudioprocess = function(e) {
+                    const inputBuffer = e.inputBuffer.getChannelData(0);
+
+                    // Convert to 16-bit PCM
+                    const pcmData = new Int16Array(inputBuffer.length);
+                    for (let i = 0; i < inputBuffer.length; i++) {
+                        pcmData[i] = Math.max(-32768, Math.min(32767, inputBuffer[i] * 32768));
+                    }
+
+                    audioData.push(pcmData);
+
+                    // Stop after 3 seconds
+                    if (Date.now() - startTime >= 3000) {
+                        processor.disconnect();
+                        source.disconnect();
+                        stream.getTracks().forEach(track => track.stop());
+
+                        // Combine all data
+                        const totalLength = audioData.reduce((sum, chunk) => sum + chunk.length, 0);
+                        const combined = new Int16Array(totalLength);
+                        let offset = 0;
+
+                        for (const chunk of audioData) {
+                            combined.set(chunk, offset);
+                            offset += chunk.length;
+                        }
+
+                        // Send immediately
+                        const base64 = btoa(String.fromCharCode.apply(null, new Uint8Array(combined.buffer)));
+
+                        const message = {
+                            type: 'audio',
+                            data: base64,
+                            sample_rate: 16000,
+                            channels: 1
+                        };
+
+                        ws.send(JSON.stringify(message));
+                        addMessage(`✅ Sent ${totalLength} samples`, 'success');
+
+                        document.getElementById('recordBtn').disabled = false;
+                        document.getElementById('recordBtn').textContent = '🎤 Record 3 Seconds';
+                    }
+                };
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+            } catch (error) {
+                addMessage(`Error: ${error}`, 'error');
+                document.getElementById('recordBtn').disabled = false;
+                document.getElementById('recordBtn').textContent = '🎤 Record 3 Seconds';
+            }
+        }
+
+        function sendTestTone() {
+            if (!isConnected) return;
+
+            // Generate a simple test tone
+            const sampleRate = 16000;
+            const duration = 2; // 2 seconds
+            const frequency = 440; // A4 note
+
+            const numSamples = sampleRate * duration;
+            const audioData = new Int16Array(numSamples);
+
+            for (let i = 0; i < numSamples; i++) {
+                const t = i / sampleRate;
+                audioData[i] = Math.sin(2 * Math.PI * frequency * t) * 16383;
+            }
+
+            const base64 = btoa(String.fromCharCode.apply(null, new Uint8Array(audioData.buffer)));
+
+            const message = {
+                type: 'audio',
+                data: base64,
+                sample_rate: sampleRate,
+                channels: 1
+            };
+
+            ws.send(JSON.stringify(message));
+            addMessage(`Sent test tone: ${duration}s at ${frequency}Hz`, 'info');
+        }
+
+        function addMessage(text, type = 'info') {
+            const messages = document.getElementById('messages');
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            div.innerHTML = `<small>${new Date().toLocaleTimeString()}</small> ${text}`;
+            messages.appendChild(div);
+            messages.scrollTop = messages.scrollHeight;
+        }
+    </script>
+</body>
+</html>

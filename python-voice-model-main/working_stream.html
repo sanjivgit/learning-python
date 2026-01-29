@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Working Audio Stream - Microphone Only</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        button { padding: 10px 20px; margin: 5px; font-size: 16px; cursor: pointer; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        #status { padding: 10px; margin: 10px 0; border-radius: 5px; font-weight: bold; background-color: #f0f0f0; }
+        #messages { margin-top: 20px; border: 1px solid #ccc; padding: 10px; height: 300px; overflow-y: scroll; background-color: #f9f9f9; }
+        .message { margin-bottom: 5px; padding: 5px; border-bottom: 1px solid #eee; }
+        .error { color: red; }
+        .info { color: blue; }
+        .success { color: green; }
+        #visualizer { width: 100%; height: 100px; background: #000; margin: 10px 0; }
+        .recording { animation: pulse 1s infinite; }
+        @keyframes pulse { 0% { background-color: #ffebee; } 50% { background-color: #ffcdd2; } 100% { background-color: #ffebee; } }
+        .device-selector { margin: 10px 0; padding: 10px; background: #e3f2fd; border-radius: 5px; }
+        .device-selector label { font-weight: bold; margin-right: 10px; }
+        .device-selector select { padding: 5px 10px; font-size: 14px; border-radius: 3px; min-width: 250px; }
+    </style>
+</head>
+<body>
+    <h1>Working Audio Stream - Microphone Only</h1>
+
+    <div class="device-selector">
+        <label for="micSelect">🎤 Microphone:</label>
+        <select id="micSelect">
+            <option value="">Default Microphone</option>
+        </select>
+        <button onclick="loadMicrophones()" style="padding: 5px 10px; font-size: 14px;">🔄 Refresh</button>
+    </div>
+
+    <div>
+        <button id="connectBtn" onclick="connect()">Connect</button>
+        <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+        <button onclick="startStopRecording()" id="recordBtn" disabled>🎤 Start Recording</button>
+        <button id="pulseBtn" onclick="sendPulse()" disabled>Send Pulse</button>
+    </div>
+
+    <div id="status">Status: Disconnected</div>
+    <canvas id="visualizer"></canvas>
+    <div id="messages"></div>
+
+    <script>
+        let ws = null;
+        let isConnected = false;
+        let audioContext = null;
+        let playbackContext = null;
+        let mediaStream = null;
+        let source = null;
+        let processor = null;
+        let isRecording = false;
+        let chunksSent = 0;
+        let animationId = null;
+        let playbackClock = 0; // scheduled playback time (seconds)
+
+        // Load available microphones on page load
+        window.addEventListener('load', async () => {
+            await loadMicrophones();
+        });
+
+        async function loadMicrophones() {
+            try {
+                // Request permission first
+                const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                tempStream.getTracks().forEach(track => track.stop());
+
+                // Now enumerate devices
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const audioDevices = devices.filter(d => d.kind === 'audioinput');
+                
+                const select = document.getElementById('micSelect');
+                select.innerHTML = '<option value="">Default Microphone</option>';
+                
+                audioDevices.forEach((device, i) => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.text = device.label || `Microphone ${i + 1}`;
+                    select.appendChild(option);
+                });
+
+                addMessage(`Found ${audioDevices.length} microphone(s)`, 'success');
+            } catch (err) {
+                addMessage(`Error loading microphones: ${err.message}`, 'error');
+            }
+        }
+
+        async function connect() {
+            ws = new WebSocket('ws://localhost:8000/api/ws');
+
+            ws.onopen = () => {
+                isConnected = true;
+                document.getElementById('status').textContent = 'Status: Connected';
+                document.getElementById('status').style.backgroundColor = '#d4edda';
+                document.getElementById('disconnectBtn').disabled = false;
+                document.getElementById('recordBtn').disabled = false;
+                document.getElementById('pulseBtn').disabled = false;
+                document.getElementById('connectBtn').disabled = true;
+                addMessage('Connected to WebSocket', 'success');
+
+                // Send initial message
+                ws.send(JSON.stringify({type: 'message', data: 'Client connected'}));
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'state') {
+                        document.getElementById('status').textContent = `Status: ${data.value}`;
+                        addMessage(`State: ${data.value}`, 'success');
+                    } else if (data.type === 'audio' && data.data) {
+                        // Lazy init playback context once
+                        if (!playbackContext) {
+                            playbackContext = new (window.AudioContext || window.webkitAudioContext)();
+                            playbackClock = 0;
+                        }
+
+                        try {
+                            const sampleRate = data.sample_rate || 24000;
+                            const byteStr = atob(data.data);
+                            const buf = new ArrayBuffer(byteStr.length);
+                            const bytes = new Uint8Array(buf);
+                            for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
+                            const view = new DataView(buf);
+                            const samples = byteStr.length / 2;
+                            const float32 = new Float32Array(samples);
+                            for (let i = 0; i < samples; i++) {
+                                const s = view.getInt16(i * 2, true);
+                                float32[i] = s / 32768;
+                            }
+                            const audioBuffer = playbackContext.createBuffer(1, float32.length, sampleRate);
+                            audioBuffer.copyToChannel(float32, 0);
+                            const src = playbackContext.createBufferSource();
+                            src.buffer = audioBuffer;
+                            src.connect(playbackContext.destination);
+                            // Jitter buffer: schedule sequentially to avoid gaps/clicks
+                            const now = playbackContext.currentTime;
+                            if (playbackClock < now + 0.05) {
+                                playbackClock = now + 0.1; // small lead-in
+                            }
+                            src.start(playbackClock);
+                            playbackClock += audioBuffer.duration;
+                        } catch (e) {
+                            addMessage(`Audio playback error: ${e.message}`, 'error');
+                        }
+                    } else {
+                        addMessage(`Received: ${JSON.stringify(data)}`, 'info');
+                    }
+                } catch (e) {
+                    addMessage(`Received: ${event.data}`, 'info');
+                }
+            };
+
+            ws.onclose = () => {
+                isConnected = false;
+                document.getElementById('status').textContent = 'Status: Disconnected';
+                document.getElementById('status').style.backgroundColor = '#f8d7da';
+                document.getElementById('disconnectBtn').disabled = true;
+                document.getElementById('recordBtn').disabled = true;
+                document.getElementById('pulseBtn').disabled = true;
+                document.getElementById('connectBtn').disabled = false;
+                addMessage('Disconnected', 'info');
+                if (isRecording) stopRecording();
+            };
+
+            ws.onerror = (error) => {
+                addMessage(`WebSocket error: ${error}`, 'error');
+            };
+        }
+
+        function disconnect() {
+            if (ws) ws.close();
+            if (playbackContext) { 
+                try { playbackContext.close(); } catch(_){} 
+                playbackContext = null; 
+            }
+        }
+
+        async function startStopRecording() {
+            if (!isRecording) {
+                await startRecording();
+            } else {
+                stopRecording();
+            }
+        }
+
+        async function startRecording() {
+            try {
+                addMessage('Starting recording...', 'info');
+                document.body.classList.add('recording');
+
+                // Get selected microphone
+                const selectedDeviceId = document.getElementById('micSelect').value;
+
+                // FIXED: Enable echo cancellation, noise suppression, and auto gain
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined,
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,      // Prevents system audio capture
+                        noiseSuppression: true,      // Removes background noise
+                        autoGainControl: true        // Normalizes volume
+                    }
+                });
+
+                // Setup audio context
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                source = audioContext.createMediaStreamSource(mediaStream);
+                processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                // Visualizer setup
+                const canvas = document.getElementById('visualizer');
+                const canvasCtx = canvas.getContext('2d');
+                canvas.width = canvas.offsetWidth;
+                canvas.height = canvas.offsetHeight;
+
+                processor.onaudioprocess = (e) => {
+                    if (!isRecording) return;
+
+                    const inputBuffer = e.inputBuffer.getChannelData(0);
+
+                    // Calculate RMS for visualization
+                    let rms = 0;
+                    for (let i = 0; i < inputBuffer.length; i++) {
+                        rms += inputBuffer[i] * inputBuffer[i];
+                    }
+                    rms = Math.sqrt(rms / inputBuffer.length);
+
+                    // Draw visualization
+                    canvasCtx.fillStyle = '#000';
+                    canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+                    canvasCtx.fillStyle = rms > 0.01 ? '#0f0' : '#f00';
+                    canvasCtx.fillRect(0, 0, canvas.width * rms, canvas.height);
+
+                    // Convert to 16-bit PCM
+                    const pcmData = new Int16Array(inputBuffer.length);
+                    for (let i = 0; i < inputBuffer.length; i++) {
+                        const sample = inputBuffer[i];
+                        pcmData[i] = Math.max(-32768, Math.min(32767, sample * 32768));
+                    }
+
+                    // Send immediately
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        const base64 = btoa(String.fromCharCode.apply(null, new Uint8Array(pcmData.buffer)));
+
+                        const message = {
+                            type: 'audio',
+                            data: base64,
+                            sample_rate: 16000,
+                            channels: 1
+                        };
+
+                        ws.send(JSON.stringify(message));
+                        chunksSent++;
+
+                        // Log every 50 chunks
+                        if (chunksSent % 50 === 0) {
+                            addMessage(`Sent chunk #${chunksSent}, RMS: ${rms.toFixed(4)}`,
+                                     rms > 0.01 ? 'success' : 'info');
+                        }
+                    }
+                };
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                isRecording = true;
+                chunksSent = 0;
+                document.getElementById('recordBtn').textContent = '⏹️ Stop Recording';
+                document.getElementById('recordBtn').style.backgroundColor = '#ff4444';
+                addMessage('Recording started - Microphone only! System audio blocked.', 'success');
+
+            } catch (error) {
+                addMessage(`Error: ${error.message}`, 'error');
+                document.body.classList.remove('recording');
+            }
+        }
+
+        function stopRecording() {
+            if (processor) {
+                processor.disconnect();
+                processor = null;
+            }
+            if (source) {
+                source.disconnect();
+                source = null;
+            }
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+
+            isRecording = false;
+            document.body.classList.remove('recording');
+            document.getElementById('recordBtn').textContent = '🎤 Start Recording';
+            document.getElementById('recordBtn').style.backgroundColor = '';
+
+            // Clear visualizer
+            const canvas = document.getElementById('visualizer');
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            addMessage(`Recording stopped. Sent ${chunksSent} chunks total.`, 'info');
+        }
+
+        function sendPulse() {
+            if (!isConnected) return;
+
+            // Generate a strong pulse
+            const sampleRate = 16000;
+            const duration = 0.5;
+            const frequency = 200;
+            const samples = sampleRate * duration;
+            const audio = new Int16Array(samples);
+
+            for (let i = 0; i < samples; i++) {
+                const t = i / sampleRate;
+                // Create a strong pulse that starts quiet and gets loud
+                const envelope = t < 0.1 ? t * 10 : 1;
+                audio[i] = Math.sin(2 * Math.PI * frequency * t) * envelope * 20000;
+            }
+
+            const base64 = btoa(String.fromCharCode.apply(null, new Uint8Array(audio.buffer)));
+
+            ws.send(JSON.stringify({
+                type: 'audio',
+                data: base64,
+                sample_rate: 16000,
+                channels: 1
+            }));
+
+            addMessage('Sent audio pulse (200Hz, 0.5s)', 'success');
+        }
+
+        function addMessage(text, type = 'info') {
+            const messages = document.getElementById('messages');
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            div.innerHTML = `<small>${new Date().toLocaleTimeString()}</small> ${text}`;
+            messages.appendChild(div);
+            messages.scrollTop = messages.scrollHeight;
+
+            // Keep only last 100 messages
+            while (messages.children.length > 100) {
+                messages.removeChild(messages.firstChild);
+            }
+        }
+
+        window.addEventListener('beforeunload', () => {
+            if (isRecording) stopRecording();
+            if (ws) ws.close();
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Voice WebSocket Test (Fixed)</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        #status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            font-weight: bold;
+            background-color: #f0f0f0;
+        }
+        #messages {
+            margin-top: 20px;
+            border: 1px solid #ccc;
+            padding: 10px;
+            height: 300px;
+            overflow-y: scroll;
+            background-color: #f9f9f9;
+        }
+        .message {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        .error { color: red; }
+        .info { color: blue; }
+        .success { color: green; }
+        #audioLevel {
+            margin: 10px 0;
+            height: 30px;
+            background-color: #e0e0e0;
+            border-radius: 5px;
+            position: relative;
+            overflow: hidden;
+        }
+        #audioLevelBar {
+            height: 100%;
+            width: 0%;
+            background-color: #4CAF50;
+            transition: width 0.1s;
+        }
+        .recording {
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0% { background-color: #ffebee; }
+            50% { background-color: #ffcdd2; }
+            100% { background-color: #ffebee; }
+        }
+    </style>
+</head>
+<body>
+    <h1>Voice WebSocket Test (Fixed)</h1>
+
+    <div>
+        <button id="connectBtn" onclick="connect()">Connect</button>
+        <button onclick="disconnect()" disabled>Disconnect</button>
+        <button onclick="toggleRecording()" id="recordBtn" disabled>🎤 Record</button>
+        <button onclick="sendMessage()" disabled>Send Text Message</button>
+    </div>
+
+    <div id="status">Status: Disconnected</div>
+    <div id="audioLevel">
+        <div id="audioLevelBar"></div>
+    </div>
+
+    <div id="messages"></div>
+
+    <script>
+        let ws = null;
+        let audioContext = null;
+        let isConnected = false;
+        let isRecording = false;
+        let mediaRecorder = null;
+        let analyser = null;
+        let microphone = null;
+        let javascriptNode = null;
+        let recordedChunks = [];
+        let audioDataBuffer = [];
+
+        function connect() {
+            ws = new WebSocket('ws://localhost:8000/api/ws');
+
+            ws.onopen = function(event) {
+                isConnected = true;
+                document.getElementById('status').textContent = 'Status: Connected';
+                document.getElementById('status').style.backgroundColor = '#d4edda';
+                document.querySelectorAll('button').forEach(btn => btn.disabled = false);
+                document.getElementById('connectBtn').disabled = true;
+                addMessage('Connected to WebSocket', 'success');
+
+                // Send initial message
+                ws.send(JSON.stringify({
+                    type: 'message',
+                    data: 'Hello from client'
+                }));
+            };
+
+            ws.onmessage = function(event) {
+                try {
+                    const data = event.data;
+                    addMessage(`Raw message: ${data}`, 'info');
+
+                    const parsed = JSON.parse(data);
+                    addMessage(`Parsed: ${JSON.stringify(parsed, null, 2)}`, 'info');
+
+                    if (parsed.type === 'state') {
+                        document.getElementById('status').textContent = `Status: ${parsed.value}`;
+                        addMessage(`State changed to: ${parsed.value}`, 'success');
+                    }
+                } catch (error) {
+                    addMessage(`Error parsing message: ${error}`, 'error');
+                    addMessage(`Message was: ${event.data}`, 'error');
+                }
+            };
+
+            ws.onclose = function(event) {
+                isConnected = false;
+                document.getElementById('status').textContent = 'Status: Disconnected';
+                document.getElementById('status').style.backgroundColor = '#f8d7da';
+                document.querySelectorAll('button').forEach(btn => btn.disabled = true);
+                document.getElementById('connectBtn').disabled = false;
+                addMessage(`Disconnected - Code: ${event.code}, Reason: ${event.reason}`, 'info');
+                if (isRecording) {
+                    stopRecording();
+                }
+            };
+
+            ws.onerror = function(error) {
+                addMessage(`WebSocket error: ${error}`, 'error');
+                console.error('WebSocket error:', error);
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+            }
+        }
+
+        function sendMessage() {
+            if (!isConnected) return;
+
+            const message = {
+                type: 'message',
+                data: 'Test message from client at ' + new Date().toISOString()
+            };
+
+            ws.send(JSON.stringify(message));
+            addMessage(`Sent: ${JSON.stringify(message)}`, 'info');
+        }
+
+        async function toggleRecording() {
+            if (!isRecording) {
+                await startRecording();
+            } else {
+                stopRecording();
+            }
+        }
+
+        async function startRecording() {
+            if (!isConnected) return;
+
+            try {
+                addMessage('🎤 Starting recording...', 'info');
+                document.body.classList.add('recording');
+
+                // Get microphone access
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
+
+                // Setup audio context for monitoring
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                }
+
+                // Create analyser for volume monitoring
+                analyser = audioContext.createAnalyser();
+                analyser.smoothingTimeConstant = 0.3;
+                analyser.fftSize = 1024;
+
+                microphone = audioContext.createMediaStreamSource(stream);
+                javascriptNode = audioContext.createScriptProcessor(2048, 1, 1);
+
+                // Connect for monitoring
+                microphone.connect(analyser);
+                analyser.connect(javascriptNode);
+                javascriptNode.connect(audioContext.destination);
+
+                // Monitor audio levels
+                javascriptNode.onaudioprocess = function() {
+                    if (!isRecording) return;
+
+                    const array = new Uint8Array(analyser.frequencyBinCount);
+                    analyser.getByteFrequencyData(array);
+                    const average = array.reduce((a, b) => a + b) / array.length;
+                    const level = Math.min(100, average * 2);
+                    document.getElementById('audioLevelBar').style.width = level + '%';
+                };
+
+                // Setup MediaRecorder for capturing audio
+                const options = {
+                    mimeType: 'audio/webm;codecs=opus'
+                };
+
+                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options.mimeType = 'audio/webm';
+                }
+                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options.mimeType = 'audio/ogg';
+                }
+
+                mediaRecorder = new MediaRecorder(stream, options);
+                recordedChunks = [];
+
+                mediaRecorder.ondataavailable = async function(event) {
+                    if (event.data.size > 0) {
+                        recordedChunks.push(event.data);
+                    }
+                };
+
+                mediaRecorder.onstop = async function() {
+                    if (recordedChunks.length === 0) return;
+
+                    // Combine chunks
+                    const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
+
+                    try {
+                        // Convert to audio buffer
+                        const arrayBuffer = await blob.arrayBuffer();
+                        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+                        // Convert to 16-bit PCM
+                        const channelData = audioBuffer.getChannelData(0);
+                        const pcm16 = new Int16Array(channelData.length);
+
+                        for (let i = 0; i < channelData.length; i++) {
+                            pcm16[i] = Math.max(-32768, Math.min(32767, channelData[i] * 32768));
+                        }
+
+                        // Convert to base64
+                        const base64 = btoa(String.fromCharCode.apply(null, new Uint8Array(pcm16.buffer)));
+
+                        const audioMessage = {
+                            type: 'audio',
+                            data: base64,
+                            sample_rate: 16000,
+                            channels: 1
+                        };
+
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify(audioMessage));
+                            addMessage(`✅ Sent audio: ${pcm16.length} samples (${(pcm16.length/16000).toFixed(2)}s)`, 'success');
+                        }
+                    } catch (error) {
+                        addMessage(`Error processing audio: ${error}`, 'error');
+                    }
+                };
+
+                // Start recording
+                mediaRecorder.start(100); // Collect data every 100ms
+                isRecording = true;
+
+                document.getElementById('recordBtn').textContent = '⏹️ Stop Recording';
+                document.getElementById('recordBtn').style.backgroundColor = '#ff4444';
+                addMessage('✅ Recording started - Speak now!', 'success');
+
+            } catch (error) {
+                addMessage(`Error starting recording: ${error}`, 'error');
+                document.body.classList.remove('recording');
+            }
+        }
+
+        function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+            }
+
+            if (microphone) {
+                microphone.disconnect();
+                microphone = null;
+            }
+
+            if (javascriptNode) {
+                javascriptNode.disconnect();
+                javascriptNode = null;
+            }
+
+            if (analyser) {
+                analyser.disconnect();
+                analyser = null;
+            }
+
+            isRecording = false;
+            document.getElementById('recordBtn').textContent = '🎤 Record';
+            document.getElementById('recordBtn').style.backgroundColor = '';
+            document.getElementById('audioLevelBar').style.width = '0%';
+            document.body.classList.remove('recording');
+            addMessage('⏹️ Recording stopped', 'info');
+        }
+
+        function addMessage(text, type = 'info') {
+            const messages = document.getElementById('messages');
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            div.innerHTML = `<small>${new Date().toLocaleTimeString()}</small> ${text}`;
+            messages.appendChild(div);
+            messages.scrollTop = messages.scrollHeight;
+        }
+
+        // Cleanup on page unload
+        window.onbeforeunload = function() {
+            disconnect();
+        };
+    </script>
+</body>
+</html>

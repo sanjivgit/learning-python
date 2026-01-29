@@ -1,0 +1,205 @@
+
+import json
+import os
+from typing import Optional
+
+import numpy as np
+from fastapi import WebSocket
+from loguru import logger
+
+from pipecat.audio.vad.vad_analyzer import VADAnalyzer, VADParams
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.runner import PipelineRunner
+from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.services.groq.llm import GroqLLMService
+from pipecat.services.groq.stt import GroqSTTService
+from pipecat.services.groq.tts import GroqTTSService
+from Service.json_serializer import JsonFrameSerializer
+from pipecat.transcriptions.language import Language
+from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
+from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
+    InputAudioRawFrame,
+    OutputTransportMessageFrame,
+    StartFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
+)
+
+
+class EnergyVAD(VADAnalyzer):
+    """Lightweight energy-based VAD for environments without Silero dependencies."""
+
+    def __init__(self, *, sample_rate: int = 16000, energy_threshold: float = 0.015, params: Optional[VADParams] = None):
+        super().__init__(sample_rate=sample_rate, params=params)
+        self._threshold = energy_threshold
+
+    def num_frames_required(self) -> int:
+        rate = self.sample_rate or self._init_sample_rate or 16000
+        # 30 ms windows for smooth estimation
+        return max(int(rate * 0.03), 1)
+
+    def voice_confidence(self, buffer) -> float:
+        if not buffer:
+            return 0.0
+        audio = np.frombuffer(buffer, dtype=np.int16)
+        if audio.size == 0:
+            return 0.0
+        normalized = audio.astype(np.float32) / 32768.0
+        rms = float(np.sqrt(np.mean(np.square(normalized))))
+        if rms <= 1e-6:
+            return 0.0
+        score = min(1.0, rms / self._threshold)
+        return score
+
+
+class AudioLoggingProcessor(FrameProcessor):
+    """Logs audio reception for debugging purposes."""
+
+    def __init__(self):
+        super().__init__()
+        self._audio_chunk_count = 0
+        self._total_audio_bytes = 0
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, InputAudioRawFrame):
+            self._audio_chunk_count += 1
+            audio_size = len(frame.audio)
+            self._total_audio_bytes += audio_size
+            
+            # Log every 50 chunks to avoid spam
+            if self._audio_chunk_count % 50 == 1:
+                logger.info(
+                    f"📥 Receiving audio from frontend | "
+                    f"Chunk #{self._audio_chunk_count} | "
+                    f"Size: {audio_size} bytes | "
+                    f"Sample rate: {frame.sample_rate}Hz | "
+                    f"Total received: {self._total_audio_bytes / 1024:.2f} KB"
+                )
+
+        await self.push_frame(frame, direction)
+
+
+class ConversationStateProcessor(FrameProcessor):
+    """Pushes conversational state updates downstream when talk/listen events occur."""
+
+    def __init__(self):
+        super().__init__()
+        self._state: Optional[str] = None
+
+    async def _notify(self, state: str):
+        if self._state == state:
+            return
+        self._state = state
+        payload = json.dumps({"type": "state", "value": state})
+        await self.push_frame(
+            OutputTransportMessageFrame(message=payload),
+            FrameDirection.DOWNSTREAM,
+        )
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, StartFrame) and direction == FrameDirection.DOWNSTREAM:
+            await self._notify("listening")
+        elif isinstance(frame, UserStartedSpeakingFrame) and direction == FrameDirection.DOWNSTREAM:
+            logger.info("🎤 User started speaking")
+            await self._notify("listening")
+        elif isinstance(frame, UserStoppedSpeakingFrame) and direction == FrameDirection.DOWNSTREAM:
+            logger.info("⏸️  User stopped speaking")
+            await self._notify("processing")
+        elif isinstance(frame, BotStartedSpeakingFrame):
+            logger.info("🔊 Bot started speaking")
+            await self._notify("responding")
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            logger.info("✅ Bot finished speaking")
+            await self._notify("listening")
+
+        await self.push_frame(frame, direction)
+
+
+class VoiceService:
+    _groq_api_key = os.getenv("GROQ_API_KEY")
+    _stt_model = os.getenv("GROQ_STT_MODEL", "whisper-large-v3-turbo")
+    _llm_model = os.getenv("GROQ_LLM_MODEL", "llama-3.3-70b-versatile")
+    _tts_model = os.getenv("GROQ_TTS_MODEL", "playai-tts")
+    _tts_voice = os.getenv("GROQ_TTS_VOICE", "Celeste-PlayAI")
+
+    @classmethod
+    async def websocket_endpoint(cls, websocket: WebSocket):
+        if not cls._groq_api_key:
+            await websocket.close(code=1011)
+            logger.error("Missing GROQ_API_KEY environment variable; refusing WebSocket connection")
+            return
+
+        await websocket.accept()
+        logger.info(f"🔌 WebSocket connection established from {websocket.client.host if websocket.client else 'unknown'}")
+
+        serializer = JsonFrameSerializer()
+        vad_params = VADParams(confidence=0.6, min_volume=0.01, start_secs=0.2, stop_secs=0.6)
+        vad_analyzer = EnergyVAD(params=vad_params)
+
+        transport_params = FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            vad_analyzer=vad_analyzer,
+            serializer=serializer,
+            session_timeout=300,
+        )
+
+        transport = FastAPIWebsocketTransport(websocket, transport_params)
+
+        audio_logger = AudioLoggingProcessor()
+        state_processor = ConversationStateProcessor()
+
+        stt = GroqSTTService(
+            api_key=cls._groq_api_key,
+            model=cls._stt_model,
+            language=Language.EN,
+        )
+        llm = GroqLLMService(
+            api_key=cls._groq_api_key,
+            model=cls._llm_model,
+        )
+        tts = GroqTTSService(
+            api_key=cls._groq_api_key,
+            model_name=cls._tts_model,
+            voice_id=cls._tts_voice,
+        )
+
+        pipeline = Pipeline(
+            [
+                transport.input(),
+                audio_logger,
+                state_processor,
+                stt,
+                llm,
+                tts,
+                transport.output(),
+            ]
+        )
+        
+        logger.info("🚀 Voice pipeline initialized and ready")
+
+        task = PipelineTask(
+            pipeline,
+            params=PipelineParams(
+                enable_metrics=True,
+                enable_usage_metrics=True,
+            ),
+        )
+
+        runner = PipelineRunner(handle_sigint=False)
+
+        try:
+            logger.info("▶️  Starting voice pipeline runner")
+            await runner.run(task)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("❌ Voice pipeline terminated unexpectedly: %s", exc)
+            raise
+        finally:
+            logger.info("🔌 WebSocket connection closed")
