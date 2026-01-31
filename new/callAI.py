@@ -58,14 +58,15 @@ async def stream_ai(prompt: str):
 
                 # Stop condition
                 if line.strip() == "data: [DONE]":
+                    yield "\n"
                     break
 
-                # Remove SSE prefix
+                # # Remove SSE prefix
                 if not line.startswith("data: "):
                     continue
 
                 payload = json.loads(line.replace("data: ", ""))
-
+                
                 choices = payload.get("choices", [])
                 if not choices:
                     continue

@@ -49,9 +49,10 @@ async def websocket_endpoint_for_bot(ws: WebSocket):
     try:
         while True:
             data = await ws.receive_text()
+
             try:
+                await ws.send_text(f"Your : {data} \n Assistat : ")
                 async for chunk in stream_ai(data):
-                    print("chunk >>>", chunk)
                     await ws.send_text(f"{chunk}")
             except Exception as e:
                 await ws.send_text(f"⚠️ AI error, please try again: {e}")

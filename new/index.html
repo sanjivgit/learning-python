@@ -1,58 +1,58 @@
 <!DOCTYPE html>
 <html>
-    <style>
-        .hide{
-            display: none;
-        }
-    </style>
-<body>
+  <style>
+    .hide {
+      display: none;
+    }
+  </style>
+  <body>
     <button id="close" class="hide" onclick="close_socket()">Close</button>
     <button id="open" onClick="open_connection()">Open</button>
-  <input id="msg" placeholder="Message" />
-  <button onclick="send()">Send</button>
-  <pre id="log"></pre>
+    <input id="msg" placeholder="Message" />
+    <button onclick="send()">Send</button>
+    <pre id="log"></pre>
 
-<script>
+    <script>
+      let ws = null;
 
-let ws = null;
+      function open_connection() {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          alert("Already connected");
+          return;
+        }
 
-function open_connection(){
-    if(ws && ws.readyState === WebSocket.OPEN){
-        alert("Already connected");
-        return;
-    }
+        ws = new WebSocket("ws://localhost:8000/ws/chat-bot");
 
-     ws = new WebSocket("ws://localhost:8000/ws/chat-bot");
+        ws.onmessage = (e) =>
+          (document.getElementById("log").innerText += e.data);
+        ws.onclose = () => {
+          alert("Disconnect");
+          document.getElementById("close").classList.add("hide");
+          document.getElementById("open").classList.remove("hide");
+        };
+        ws.onopen = () => {
+          alert("Connection open");
+          document.getElementById("close").classList.remove("hide");
+          document.getElementById("open").classList.add("hide");
+        };
+        ws.onerror = (e) => alert("Error:- ", JSON.stringify(e));
+      }
 
-     ws.onmessage = e => document.getElementById("log").innerText += e.data + "\n";
-     ws.onclose = () => {
-        alert("Disconnect")
-        document.getElementById("close").classList.add("hide") 
-        document.getElementById("open").classList.remove("hide")
-     };
-     ws.onopen = () => {
-         alert("Connection open")
-        document.getElementById("close").classList.remove("hide") 
-        document.getElementById("open").classList.add("hide")
-    }
-     ws.onerror = (e) => alert("Error:- ", JSON.stringify(e))
-}
+      function close_socket() {
+        if (ws) {
+          ws.close(1000, "User closed");
+        } else {
+          alert("Already Disconnected");
+        }
+      }
 
-function close_socket(){
-    if(ws){
-        ws.close(1000, "User closed");
-    } else {
-        alert("Already Disconnected")
-    }
-}
-
-function send() {
-  if(ws && ws.readyState === WebSocket.OPEN){
-    ws.send(document.getElementById("msg").value);
-  } else {
-    alert("Socket is not connected")
-  }
-}
-</script>
-</body>
+      function send() {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(document.getElementById("msg").value);
+        } else {
+          alert("Socket is not connected");
+        }
+      }
+    </script>
+  </body>
 </html>
