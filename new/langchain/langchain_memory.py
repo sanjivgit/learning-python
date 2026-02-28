@@ -1,5 +1,5 @@
-from langchain.memory import ConversationBufferMemory
+# from langchain.memory import ConversationBufferMemory
 
-memory = ConversationBufferMemory(
-    return_messages=True
-)
+# memory = ConversationBufferMemory(
+#     return_messages=True
+# )

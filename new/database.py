@@ -5,6 +5,8 @@ from model.user import Base
 
 DATABASE_URL="postgresql+asyncpg://postgres:Postgres%402024@localhost:5432/mydb"
 
+GROQ_API_KEY=""
+
 engine = create_async_engine(
     DATABASE_URL,
     echo=True,          # logs SQL (good for learning)
