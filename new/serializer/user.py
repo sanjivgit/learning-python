@@ -7,3 +7,8 @@ class UserCreate(BaseModel):
 
 class UserMessage(BaseModel):
     message: str = Field(..., min_length=1, max_length=500)
+
+
+class SessionBasedUserMessage(BaseModel):
+    session_id: str = Field(..., min_length=1, max_length=100)
+    message: str = Field(..., min_length=1, max_length=500)

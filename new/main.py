@@ -3,11 +3,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from dao.users import get_users, create_user
 from database import init_db
-from serializer.user import UserCreate, UserMessage
+from serializer.user import UserCreate, UserMessage, SessionBasedUserMessage
 from connectionManager import ConnectionManager
 from callAI import stream_ai
 from dotenv import load_dotenv
-from agents import run_agent
+from agents import run_agent, session_based_agent
 load_dotenv()
 
 app = FastAPI()
@@ -65,4 +65,11 @@ async def websocket_endpoint_for_bot(ws: WebSocket):
 async def chat(data: UserMessage):
     user_message = data.message
     response = run_agent(user_message)
+    return {"response": response}
+
+@app.post("/session/chat")
+async def chat(data: SessionBasedUserMessage, db: AsyncSession = Depends(get_db)):
+    user_message = data.message
+    session_id = data.session_id
+    response = await session_based_agent(db, session_id, user_message)
     return {"response": response}
